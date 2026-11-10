@@ -1,0 +1,14 @@
+{
+  "name": "robo-baixa-comprovante",
+  "private": true,
+  "description": "Robô SSW: baixa de entrega (038) + foto do comprovante (398) + capa (040)",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "ver": "HEADLESS=0 DEBUG=1 node index.js"
+  },
+  "dependencies": {
+    "dotenv": "^17.4.2",
+    "playwright": "1.60.0"
+  }
+}

@@ -1,0 +1,29 @@
+# dependencies
+node_modules/
+
+# environment
+.env
+
+# logs
+logs/
+*.log
+
+# debug
+debug/
+
+# playwright
+playwright-report/
+test-results/
+
+# vscode
+.vscode/
+
+# os
+.DS_Store
+Thumbs.db
+
+
+# entrada/saida locais (podem ter caminho de foto)
+baixas.json
+resultados/
+teste/
