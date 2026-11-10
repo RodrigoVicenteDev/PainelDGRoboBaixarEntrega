@@ -5,10 +5,12 @@
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "ver": "HEADLESS=0 DEBUG=1 node index.js"
+    "ver": "HEADLESS=0 DEBUG=1 node index.js",
+    "teste": "HEADLESS=0 DEBUG=1 node index.js baixas.json"
   },
   "dependencies": {
     "dotenv": "^17.4.2",
-    "playwright": "1.60.0"
+    "playwright": "1.60.0",
+    "sharp": "0.33.5"
   }
 }

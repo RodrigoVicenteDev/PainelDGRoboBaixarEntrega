@@ -5,10 +5,12 @@
 //   2) 398 Escanear Comprovante → uma subida por FOTO (CTRC com várias NFs = várias fotos)
 //   3) 040 Capa de Comprovantes → "Gerar meus" (uma capa por baixa, igual à descarga do roboComplementar)
 //
-// 1ª versão: entrada por arquivo JSON (sem API Dago). Ver README.md e baixas.exemplo.json.
-//   node index.js [baixas.json]
-// Saída: resultados/resultado_<data>.json no MESMO formato da entrada, com o status de cada
-// etapa. Dá para rodar de novo passando esse arquivo: só refaz o que deu "erro" ou ficou pendente.
+// Dois modos:
+//   node index.js              → PRODUÇÃO: pega a fila na API Dago (baixas prontas da Dora/Arquivo),
+//                                baixa e enquadra as fotos, roda 038/398/040 e devolve CTRC a CTRC.
+//                                Disparado pelo escutador (chave "baixa-comprovante") quando há baixa pronta.
+//   node index.js baixas.json  → TESTE: lê o arquivo; resultado em resultados/resultado_<data>.json
+//                                (re-rodável: só refaz o que deu "erro" ou ficou pendente).
 
 require("dotenv").config();
 
@@ -25,6 +27,8 @@ const { trocarUnidadeMenu } = require("./robots/comum");
 const { abrir038, baixarCtrc } = require("./robots/baixa038");
 const { abrir398, subirFoto } = require("./robots/comprovante398");
 const capaComprovante040 = require("./robots/capaComprovante040");
+const api = require("./dagoApi");
+const { enquadrar } = require("./enquadrar");
 
 const HEADLESS = String(process.env.HEADLESS ?? "1").trim() !== "0";
 const SLOWMO = Number(process.env.SLOWMO ?? 0);
@@ -65,8 +69,14 @@ function carregarItens(arquivo) {
   const lista = Array.isArray(bruto) ? bruto : bruto.baixas;
   if (!Array.isArray(lista)) throw new Error(`${arquivo}: esperado uma lista (ou { "baixas": [...] }).`);
 
-  return lista.map((raw, i) => {
+  return lista.map((raw, i) => normalizarItem(raw, `Linha ${i + 1}`));
+}
+
+// Mesmo formato p/ o arquivo e p/ a API (BaixaParaRoboDTO). Inválido vira _invalido (não para o robô).
+function normalizarItem(raw, rotulo) {
+  {
     const item = {
+      id: raw.id ?? null, // id da baixa na API (modo API)
       ctrc: raw.ctrc,
       unidade: String(raw.unidade ?? "").trim().toUpperCase(),
       data: raw.data,
@@ -85,14 +95,15 @@ function carregarItens(arquivo) {
       if (!item._ctrc.sigla) throw new Error(`CTRC "${item.ctrc}" sem sigla (use ex. CCM143231-1)`);
       if (!/^[A-Z]{3}$/.test(item.unidade)) throw new Error(`unidade inválida "${raw.unidade}" (sigla de 3 letras, ex. FEC)`);
       if (!CODIGOS_ACEITOS.has(item.codigo)) throw new Error(`código ${item.codigo} não é automático (só 01 e 17)`);
-      item.data = normalizarData(item.data);
+      // Data só é obrigatória quando o robô vai fazer a 038 (CTRC já entregue = só fotos).
+      if (statusDe(item.baixa) !== "ok") item.data = normalizarData(item.data);
       item.hora = normalizarHora(item.hora);
       if (item.fotos.length === 0) throw new Error("sem fotos");
     } catch (e) {
-      item._invalido = `Linha ${i + 1}: ${e.message}`;
+      item._invalido = `${rotulo}: ${e.message}`;
     }
     return item;
-  });
+  }
 }
 
 // ---------------- saída ----------------
@@ -195,86 +206,164 @@ async function processarUnidade(context, unidade, itens, salvar) {
   }
 }
 
-async function run() {
-  const { LOG_FILE } = setupLogger();
-  limparAntigos("logs", 4);
-  limparAntigos("debug", 4);
+// ---------------- navegador SSW ----------------
 
-  const arquivoEntrada = path.resolve(process.argv[2] ?? "baixas.json");
-  fs.mkdirSync("resultados", { recursive: true });
-  const arquivoSaida = path.resolve(
-    "resultados",
-    `resultado_${agoraIso().replace(/[:.]/g, "-").slice(0, 19)}.json`
+async function abrirSsw() {
+  const browser = await chromium.launch({ headless: HEADLESS, slowMo: SLOWMO });
+  const context = await browser.newContext({ acceptDownloads: true, viewport: { width: 1366, height: 768 } });
+
+  // Alertas nativos (window.alert) do SSW: registra o texto e aceita.
+  context.__alertas = [];
+  context.on("page", (p) =>
+    p.on("dialog", async (d) => {
+      const texto = String(d.message() ?? "").trim();
+      console.log(`💬 Alerta do SSW (${d.type()}): ${texto}`);
+      context.__alertas.push({ texto, quando: Date.now() });
+      await d.accept().catch(() => {});
+    })
   );
+  await loginSSW(await context.newPage());
+  return { browser, context };
+}
 
-  console.log("🤖 Robô de baixa + comprovante iniciado");
-  console.log("Entrada:", arquivoEntrada);
-  console.log("Saída:", arquivoSaida);
-  console.log("HEADLESS:", HEADLESS, "| Log:", LOG_FILE);
-
-  const itens = carregarItens(arquivoEntrada);
-  const salvar = () => salvarResultado(arquivoSaida, itens);
-
-  for (const it of itens.filter((x) => x._invalido)) {
-    marcar(it, "baixa", "erro", it._invalido);
-    console.error(`❌ ${it._invalido}`);
-  }
-
-  const validos = itens.filter((x) => !x._invalido);
+function agruparPorUnidade(itens) {
   const porUnidade = new Map();
-  for (const it of validos) {
+  for (const it of itens.filter((x) => !x._invalido)) {
     if (!porUnidade.has(it.unidade)) porUnidade.set(it.unidade, []);
     porUnidade.get(it.unidade).push(it);
   }
-  salvar();
+  return porUnidade;
+}
 
-  if (porUnidade.size > 0) {
-    const browser = await chromium.launch({ headless: HEADLESS, slowMo: SLOWMO });
-    try {
-      const context = await browser.newContext({ acceptDownloads: true, viewport: { width: 1366, height: 768 } });
-
-      // Alertas nativos (window.alert) do SSW: registra o texto e aceita (a 398 usa p/ o resultado?).
-      context.__alertas = [];
-      const ouvirAlertas = (p) =>
-        p.on("dialog", async (d) => {
-          const texto = String(d.message() ?? "").trim();
-          console.log(`💬 Alerta do SSW (${d.type()}): ${texto}`);
-          context.__alertas.push({ texto, quando: Date.now() });
-          await d.accept().catch(() => {});
-        });
-      context.on("page", ouvirAlertas);
-      await loginSSW(await context.newPage());
-
-      for (const [unidade, lista] of porUnidade) {
-        try {
-          await processarUnidade(context, unidade, lista, salvar);
-        } catch (e) {
-          console.error(`❌ Unidade ${unidade} interrompida:`, e?.stack || e);
-          await recuperar(context);
-        }
-      }
-    } finally {
-      await browser.close().catch(() => {});
-    }
-  }
-
-  salvar();
-
-  // ---- resumo ----
+function resumo(itens) {
   const n = (f) => itens.filter(f).length;
   const fotos = itens.flatMap((it) => it.fotos);
   console.log("======================================");
   console.log(`Baixas: ${n((i) => statusDe(i.baixa) === "ok")} ok · ${n((i) => statusDe(i.baixa) === "erro")} erro · ${n((i) => statusDe(i.baixa) === "indefinido")} indefinido`);
   console.log(`Fotos:  ${fotos.filter((f) => f.status === "ok").length} ok · ${fotos.filter((f) => f.status === "erro").length} erro · ${fotos.filter((f) => f.status === "indefinido").length} indefinido · ${fotos.filter((f) => !f.status).length} não enviadas`);
   console.log(`Capas:  ${n((i) => statusDe(i.capa) === "ok")} ok · ${n((i) => statusDe(i.capa) === "erro")} erro`);
-  console.log("Resultado:", arquivoSaida);
   console.log("======================================");
-
-  const tudoOk =
-    itens.every((i) => statusDe(i.baixa) === "ok") &&
+  return itens.every((i) => statusDe(i.baixa) === "ok") &&
     fotos.every((f) => f.status === "ok") &&
     itens.every((i) => statusDe(i.capa) === "ok");
-  process.exit(tudoOk ? 0 : 1);
+}
+
+// ---------------- modo ARQUIVO (teste): node index.js baixas.json ----------------
+
+async function rodarArquivo(arquivoEntrada) {
+  fs.mkdirSync("resultados", { recursive: true });
+  const arquivoSaida = path.resolve("resultados", `resultado_${agoraIso().replace(/[:.]/g, "-").slice(0, 19)}.json`);
+  console.log("Entrada:", arquivoEntrada, "| Saída:", arquivoSaida);
+
+  const itens = carregarItens(arquivoEntrada);
+  const salvar = () => salvarResultado(arquivoSaida, itens);
+  for (const it of itens.filter((x) => x._invalido)) {
+    marcar(it, "baixa", "erro", it._invalido);
+    console.error(`❌ ${it._invalido}`);
+  }
+  salvar();
+
+  const porUnidade = agruparPorUnidade(itens);
+  if (porUnidade.size > 0) {
+    const { browser, context } = await abrirSsw();
+    try {
+      for (const [unidade, lista] of porUnidade) {
+        try { await processarUnidade(context, unidade, lista, salvar); }
+        catch (e) { console.error(`❌ Unidade ${unidade} interrompida:`, e?.stack || e); await recuperar(context); }
+      }
+    } finally {
+      await browser.close().catch(() => {});
+    }
+  }
+  salvar();
+  console.log("Resultado:", arquivoSaida);
+  return resumo(itens);
+}
+
+// ---------------- modo API (produção): node index.js ----------------
+// Pega a fila no PainelDG, baixa as fotos, enquadra, faz 038/398/040 e devolve CTRC a CTRC.
+// Repete até a fila esvaziar (o back dispara o robô pelo escutador quando há baixa pronta).
+// Fotos baixadas ficam em tmp/ só durante a rodada (baixa, usa e apaga).
+
+const PASTA_TMP = path.resolve("tmp");
+const MAX_RODADAS = 20;
+
+function resultadoParaApi(it) {
+  return {
+    baixa: it.baixa ? { status: it.baixa.status, mensagem: it.baixa.mensagem ?? null } : null,
+    capa: it.capa ? { status: it.capa.status, mensagem: it.capa.mensagem ?? null } : null,
+    fotos: it.fotos.filter((f) => f.id && f.status).map((f) => ({ id: f.id, status: f.status, mensagem: f.mensagem ?? null })),
+  };
+}
+
+async function prepararFotos(it) {
+  for (const f of it.fotos) {
+    if (["ok", "indefinido"].includes(f.status)) continue;
+    f.original = await api.baixarFoto(f.fotoId, PASTA_TMP);
+    let enquadrada = null;
+    try { enquadrada = await enquadrar(f.original, f.enquadramento); }
+    catch (e) { console.log(`   enquadrar: erro (${e.message}); usando a original.`); }
+    f.arquivo = enquadrada ?? f.original;
+    console.log(`   foto ${f.fotoId}: ${enquadrada ? "enquadrada" : "original"}`);
+  }
+}
+
+async function rodarApi() {
+  await api.login();
+  let browser = null, context = null;
+  const todos = [];
+
+  try {
+    for (let rodada = 1; rodada <= MAX_RODADAS; rodada++) {
+      const lote = await api.proximas(20);
+      if (!lote.length) { console.log("Fila vazia."); break; }
+      console.log(`📦 Rodada ${rodada}: ${lote.length} baixa(s).`);
+
+      const itens = lote.map((raw) => normalizarItem(raw, `Baixa ${raw.id}`));
+      todos.push(...itens);
+
+      // Inválido (não deveria vir do back): devolve como erro p/ ir ao Arquivo.
+      for (const it of itens.filter((x) => x._invalido)) {
+        marcar(it, "baixa", "erro", it._invalido);
+        await api.enviarResultado(it.id, resultadoParaApi(it)).catch((e) => console.error("❌", e.message));
+      }
+
+      if (!context) ({ browser, context } = await abrirSsw());
+
+      for (const [unidade, lista] of agruparPorUnidade(itens)) {
+        console.log("======================================");
+        console.log(`🏢 Unidade ${unidade}: ${lista.length} CTRC(s)`);
+        for (const it of lista) {
+          console.log(`—— ${it.ctrc} (baixa ${it.id}, ${it.fotos.length} foto(s)) ——`);
+          try {
+            await prepararFotos(it);
+            await processarCtrc(context, unidade, it, () => {});
+          } catch (e) {
+            console.error(`❌ ${it.ctrc}:`, e?.stack || e);
+            if (!it.baixa) marcar(it, "baixa", "erro", `Robô: ${e.message}`);
+            await recuperar(context);
+          }
+          try { await api.enviarResultado(it.id, resultadoParaApi(it)); }
+          catch (e) { console.error(`❌ Não consegui devolver o resultado da baixa ${it.id}:`, e.message); }
+        }
+      }
+      fs.rmSync(PASTA_TMP, { recursive: true, force: true });
+    }
+  } finally {
+    if (browser) await browser.close().catch(() => {});
+    fs.rmSync(PASTA_TMP, { recursive: true, force: true });
+  }
+  return resumo(todos);
+}
+
+async function run() {
+  const { LOG_FILE } = setupLogger();
+  limparAntigos("logs", 4);
+  limparAntigos("debug", 4);
+  console.log("🤖 Robô de baixa + comprovante iniciado | HEADLESS:", HEADLESS, "| Log:", LOG_FILE);
+
+  const ok = process.argv[2] ? await rodarArquivo(path.resolve(process.argv[2])) : await rodarApi();
+  process.exit(ok ? 0 : 1);
 }
 
 run().catch((e) => {

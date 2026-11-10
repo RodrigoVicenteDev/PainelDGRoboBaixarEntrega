@@ -8,18 +8,30 @@ e, **para cada CTRC**, nesta ordem:
 3. **040 Capa de Comprovantes** → "Gerar meus" (nunca "todos"): **uma capa por baixa**, igual à descarga
    do roboComplementar. Sai mesmo se alguma foto falhar (a baixa já existe; a foto é retentada depois).
 
-1ª versão: lê um arquivo JSON (ainda sem a API Dago / Dora).
+## Dois modos
+
+- **Produção (`node index.js`, sem argumento):** pega a fila na API Dago
+  (`POST api/baixa-comprovante/robo/proximas`), baixa as fotos para `tmp/`, **enquadra** cada uma,
+  roda 038 → 398 → 040 e devolve o resultado CTRC a CTRC (`POST .../robo/{id}/resultado`). Repete até a
+  fila esvaziar. Quem chama é o **escutador** (chave `baixa-comprovante` → `run-baixa.sh`): o back dispara
+  sozinho quando há baixa pronta (respiro de 2 min; se já estiver rodando, o lock segura).
+- **Teste (`node index.js baixas.json`):** lê o arquivo, como na 1ª versão.
+
+### Enquadrar a foto (`enquadrar.js`)
+A IA do back (gpt-6.1-terra) devolve os 4 cantos do papel (0–1000) e a rotação; o robô corta com
+perspectiva, gira e dá contraste leve antes da 398. Só usa o recorte se os cantos forem plausíveis
+(dentro da foto, quadrilátero convexo, papel ≥ 15% da foto, lados não minúsculos) e com 2% de folga;
+senão sobe a **original**. A leitura dos dados e a tela do Arquivo usam sempre a original.
 
 ## Rodar
 
 ```bash
 npm install
 npx playwright install chromium
-cp .env.example .env      # preencher SITE_*
-cp baixas.exemplo.json baixas.json   # editar
-npm run ver               # com navegador + prints em debug/
-npm start                 # headless
-node index.js outro.json  # outro arquivo
+cp .env.example .env      # preencher SITE_*, DAGO_*, ROBO_TOKEN
+npm run ver               # produção com navegador + prints em debug/
+npm start                 # produção headless
+npm run teste             # modo arquivo (baixas.json) com navegador
 ```
 
 ## Entrada (`baixas.json`)
