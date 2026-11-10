@@ -299,7 +299,13 @@ function resultadoParaApi(it) {
 async function prepararFotos(it) {
   for (const f of it.fotos) {
     if (["ok", "indefinido"].includes(f.status)) continue;
+    // A API devolve a versão editada pelo Arquivo quando existe (girada/recortada à mão).
     f.original = await api.baixarFoto(f.fotoId, PASTA_TMP);
+    if (f.editada) {
+      f.arquivo = f.original;
+      console.log(`   foto ${f.fotoId}: editada pelo Arquivo (sem enquadramento automático)`);
+      continue;
+    }
     let enquadrada = null;
     try { enquadrada = await enquadrar(f.original, f.enquadramento); }
     catch (e) { console.log(`   enquadrar: erro (${e.message}); usando a original.`); }
