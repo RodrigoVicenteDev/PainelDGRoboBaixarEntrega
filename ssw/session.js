@@ -7,7 +7,7 @@ const {
   findFrameWithSelector,
 } = require("./helpers");
 
-const LOGIN_URL = "https://sistema.ssw.inf.br/bin/ssw0422";
+const LOGIN_URL = "https://tms.ssw.inf.br/bin/ssw0422";
 
 const SITE_DOMINIO = process.env.SITE_DOMINIO ?? "";
 const SITE_CPF = process.env.SITE_CPF ?? "";
