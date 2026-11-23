@@ -28,3 +28,6 @@ baixas.json
 resultados/
 teste/
 tmp/
+
+# sessão SSW (cópia local)
+.sessao-ssw-cache.json

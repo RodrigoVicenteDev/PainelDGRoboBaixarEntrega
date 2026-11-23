@@ -7,82 +7,16 @@ const {
   findFrameWithSelector,
 } = require("./helpers");
 
-const LOGIN_URL = "https://tms.ssw.inf.br/bin/ssw0422";
-
-const SITE_DOMINIO = process.env.SITE_DOMINIO ?? "";
-const SITE_CPF = process.env.SITE_CPF ?? "";
-const SITE_USER = process.env.SITE_USER ?? "";
-const SITE_PASS = process.env.SITE_PASS ?? "";
+// SSW pôs reCAPTCHA no login (22/11/2026): o robô não loga mais, usa a sessão
+// compartilhada capturada por uma pessoa pelo DAGO (ver sessaoSswApi.js).
+const { entrarComSessaoSsw } = require("./sessaoSswApi");
 
 async function loginSSW(page) {
-  if (!SITE_DOMINIO || !SITE_CPF || !SITE_USER || !SITE_PASS) {
-    throw new Error(
-      "Variáveis obrigatórias ausentes: SITE_DOMINIO, SITE_CPF, SITE_USER, SITE_PASS"
-    );
-  }
-
-  console.log("1) Abrindo login SSW...");
-
-  await page.goto(LOGIN_URL, {
-    waitUntil: "domcontentloaded",
-  });
-
-  console.log("2) Preenchendo login SSW...");
-
-  await page.locator('input[id="1"]').fill(SITE_DOMINIO);
-  await page.locator('input[id="2"]').fill(SITE_CPF);
-  await page.locator('input[id="3"]').fill(SITE_USER);
-  await page.locator('input[id="4"]').fill(SITE_PASS);
-
-  console.log("3) Clicando entrar...");
-
-  await page.locator('a[id="5"]').click();
-
-  await page.waitForLoadState("domcontentloaded").catch(() => {});
-  await page
-    .waitForLoadState("networkidle", {
-      timeout: 10000,
-    })
-    .catch(() => {});
-
-  const erroLogin = await page
-    .locator("div#errormsglabel")
-    .innerText()
-    .catch(() => "");
-
-  if (erroLogin && !page.url().includes("/bin/menu01")) {
-    throw new Error(
-      `Login SSW falhou: ${erroLogin.replace(/\s+/g, " ").trim()}`
-    );
-  }
-
-  const menuFrame = await waitForFrameWithSelector(
-    page,
-    'input[name="f3"]',
-    15000
-  );
-
-  const estaNoMenu =
-    page.url().includes("/bin/menu01") && !!menuFrame;
-
-  if (!estaNoMenu) {
-    debugFrames(page, "(login sem menu)");
-
-    await debugScreenshot(
-      page,
-      "falha_login_ssw_sem_menu.png"
-    );
-
-    throw new Error(
-      `Login SSW não abriu o menu. URL atual: ${page.url()}`
-    );
-  }
-
-  console.log("4) Logado no SSW. URL:", page.url());
+  // Mesmo nome de antes para não mexer nos robôs: agora só carrega a sessão.
+  await entrarComSessaoSsw(page);
 
   debugFrames(page, "(após login)");
   debugContextPages(page.context(), "(após login)");
-
   await debugScreenshot(page, "01_pos_login.png");
 }
 
