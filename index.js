@@ -28,6 +28,7 @@ const { abrir038, baixarCtrc } = require("./robots/baixa038");
 const { abrir398, subirFoto } = require("./robots/comprovante398");
 const capaComprovante040 = require("./robots/capaComprovante040");
 const api = require("./dagoApi");
+const { reportarProgresso } = require("./ssw/sessaoSswApi");
 const { enquadrar } = require("./enquadrar");
 
 const HEADLESS = String(process.env.HEADLESS ?? "1").trim() !== "0";
@@ -171,6 +172,16 @@ async function processarCtrc(context, unidade, it, salvar) {
       Object.assign(foto, { status: r.status, mensagem: r.mensagem, quando: agoraIso() });
       console.log(`${r.status === "ok" ? "✅" : "❌"} 398 ${it.ctrc} ${path.basename(foto.arquivo)}: ${r.mensagem}`);
       if (r.status !== "ok") tela398 = null;
+      // CTRC não baixado no SSW: a 398 recusa todas as fotos dele (~1 min cada). Marca as que faltam e segue.
+      if (r.status === "erro" && /ainda n[aã]o entregue|op[cç][aã]o 38/i.test(r.mensagem || "")) {
+        for (const resto of it.fotos) {
+          if (resto !== foto && !["ok", "indefinido"].includes(resto.status))
+            Object.assign(resto, { status: "erro", mensagem: r.mensagem, quando: agoraIso() });
+        }
+        console.log(`⏭️  398 ${it.ctrc}: CTRC não baixado no SSW — pulando as outras fotos.`);
+        salvar();
+        break;
+      }
     } catch (e) {
       Object.assign(foto, { status: "erro", mensagem: `Robô: ${e.message}`, quando: agoraIso() });
       console.error(`❌ 398 ${it.ctrc} ${foto.arquivo}:`, e?.stack || e);
@@ -314,10 +325,30 @@ async function prepararFotos(it) {
   }
 }
 
+// Barra de progresso no DAGO (botão "Enviar fila" do Arquivo / disparo automático do back).
+// Nome da execução tem que bater com RobosSswController.ExecucaoBaixa / EtapasBaixa.
+const EXECUCAO = "baixa-comprovante";
+const ETAPA = "Baixas";
+const progresso = (status, mensagem) => reportarProgresso(EXECUCAO, ETAPA, status, mensagem, [ETAPA]);
+
 async function rodarApi() {
   await api.login();
   let browser = null, context = null;
   const todos = [];
+
+  // Abre o SSW ANTES de pegar a fila: sem sessão válida o robô sai sem tocar nas baixas
+  // (elas seguem PRONTA_ROBO, sem gastar tentativa, e o back dispara de novo quando
+  // alguém autenticar).
+  await progresso("rodando", "Abrindo o SSW");
+  try {
+    ({ browser, context } = await abrirSsw());
+  } catch (e) {
+    await progresso("erro", e?.sessaoExpirada
+      ? "Sessão do SSW vencida: autentique pelo DAGO que a fila roda sozinha."
+      : `Não abriu o SSW: ${e?.message || e}`);
+    if (browser) await browser.close().catch(() => {});
+    throw e;
+  }
 
   try {
     for (let rodada = 1; rodada <= MAX_RODADAS; rodada++) {
@@ -334,8 +365,6 @@ async function rodarApi() {
         await api.enviarResultado(it.id, resultadoParaApi(it)).catch((e) => console.error("❌", e.message));
       }
 
-      if (!context) ({ browser, context } = await abrirSsw());
-
       for (const [unidade, lista] of agruparPorUnidade(itens)) {
         console.log("======================================");
         console.log(`🏢 Unidade ${unidade}: ${lista.length} CTRC(s)`);
@@ -351,15 +380,29 @@ async function rodarApi() {
           }
           try { await api.enviarResultado(it.id, resultadoParaApi(it)); }
           catch (e) { console.error(`❌ Não consegui devolver o resultado da baixa ${it.id}:`, e.message); }
+          await progresso("rodando", `${todos.filter((x) => x.baixa || x.capa).length} de ${todos.length} CTRC(s) processado(s)`);
         }
       }
       fs.rmSync(PASTA_TMP, { recursive: true, force: true });
     }
+  } catch (e) {
+    await progresso("erro", e?.sessaoExpirada
+      ? "Sessão do SSW venceu no meio: autentique pelo DAGO que o resto roda sozinho."
+      : `Robô parou: ${e?.message || e}`);
+    throw e;
   } finally {
     if (browser) await browser.close().catch(() => {});
     fs.rmSync(PASTA_TMP, { recursive: true, force: true });
   }
-  return resumo(todos);
+
+  const ok = resumo(todos);
+  const baixados = todos.filter((i) => statusDe(i.baixa) === "ok").length;
+  const comErro = todos.length - baixados;
+  // "ok" na barra = o robô terminou; baixas com erro já voltaram p/ a fila/Arquivo pelo resultado.
+  await progresso("ok", todos.length === 0
+    ? "Fila vazia."
+    : `${baixados} baixada(s) no SSW${comErro ? ` · ${comErro} com erro/indefinida (ver Arquivo)` : ""}.`);
+  return ok;
 }
 
 async function run() {

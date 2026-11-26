@@ -109,7 +109,9 @@ async function subirFoto(context, tela, ctrc, caminhoFoto) {
   const ser = limparTexto(await lerValor(cte.target, "#h_ser_ctrc")).toUpperCase();
   const num = limparTexto(await lerValor(cte.target, "#h_num_ctrc"));
   const dig = limparTexto(await lerValor(cte.target, "#h_dig_ctrc"));
-  if (ser !== ctrc.sigla || num !== ctrc.numero || dig !== ctrc.dv) {
+  // O SSW mostra o número sem zeros à esquerda (VIX000288-7 → "288"): compara sem eles.
+  const semZeros = (s) => String(s ?? "").replace(/^0+/, "");
+  if (ser !== ctrc.sigla || semZeros(num) !== semZeros(ctrc.numero) || !semZeros(num) || dig !== ctrc.dv) {
     await debugScreenshot(cte.page, `398_ctrc_divergente_${ctrc.original}.png`);
     await fecharTelaCte(cte.target);
     return { status: "erro", mensagem: `398 abriu ${ser}${num}-${dig}, esperado ${ctrc.original}. Foto não enviada.` };
